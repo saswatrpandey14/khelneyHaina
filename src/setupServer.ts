@@ -6,9 +6,17 @@ import hpp from 'hpp';
 import cookierSession from 'cookie-session';
 import compression from 'compression';
 import HTTP_STATUS from 'http-status-codes'
+import {Server} from 'socket.io'
+import { createClient } from 'redis';
+import { createAdapter } from '@socket.io/redis-adapter';
+import Logger from 'bunyan';
 import 'express-async-errors';
+import {config} from './config';
+import applicationRoutes from './routes'
+import {CustomError, IErrorResponse} from './shared/globals/helpers/error-handler'
 
 const SERVER_PORT = 5000;
+const log: Logger = config.createLogger('server');
 
 export class KhelneHaina {
   private app: Application;
@@ -29,16 +37,16 @@ export class KhelneHaina {
     app.use(
         cookierSession({
             name: 'session',
-            keys: ['test1', 'test2'],
+            keys: [config.SECRETE_KEY_ONE!, config.SECRETE_KEY_TWO!],
             maxAge: 24 * 7 * 3600000,
-            secure: false 
+            secure: config.NODE_ENV !== 'development' 
         })
    );
    app.use(helmet());
    app.use(hpp());
    app.use(
     cors({
-        origin: '*',
+        origin: config.CLIENT_URL,
         credentials: true,
         optionsSuccessStatus: 200,
         methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS']
@@ -51,23 +59,54 @@ export class KhelneHaina {
     app.use(json({limit: '50mb'}));
     app.use(urlencoded({extended: true, limit: '50mb'}));
   }
-  private routeMiddleware(app: Application): void {}
-  private globalErrorHandler(app: Application): void {}
+  private routeMiddleware(app: Application): void {
+    applicationRoutes(app);
+  }
+  private globalErrorHandler(app: Application): void {
+    app.all('*', (req: Request, res: Response)=>{
+      res.status(HTTP_STATUS.NOT_FOUND).json({message: `${req.originalUrl} not found`});
+    });
+
+    app.use((error: IErrorResponse, req: Request, res: Response, next: NextFunction) =>{
+      log.error(error);
+      if (error instanceof CustomError) {
+        return res.status(error.statusCode).json(error.serializeErrors());
+      }
+      next();
+    });
+  }
 
   private async startServer(app: Application): Promise<void> {
     try {
         const httpServer: http.Server = new http.Server(app);
+        const socketIO: Server = await this.createSockerIO(httpServer);
         this.startHttpServer(httpServer);
+        this.socketIOConnections(socketIO);
     } catch (error) {
-        console.log(error);
+        log.error(error);
     }
   }
 
-  private createSockerIO(httpServer: http.Server): void {} 
-  private startHttpServer(httpServer: http.Server): void {
+  private async createSockerIO(httpServer: http.Server): Promise<Server> {
+    const io: Server = new Server(httpServer, {
+      cors: {
+        origin: config.CLIENT_URL,
+        methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'] 
+      }       
+    });
+    const pubClient = createClient({url: config.REDIS_HOST})
+    const subClient = pubClient.duplicate();
+    await Promise.all([pubClient.connect(),  subClient.connect()] );
+    io.adapter(createAdapter(pubClient, subClient));
+    return io;
+  } 
+
+  private  startHttpServer(httpServer: http.Server): void {
+    log.info(`Server has started with process ${process.pid}`)
     httpServer.listen(SERVER_PORT, () => {
-        console.log(`Server running on port ${SERVER_PORT}`);
+        log.info(`Server running on port ${SERVER_PORT}`);
     });
   }
 
+  private socketIOConnections(io: Server): void{}
 }
